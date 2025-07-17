@@ -14,12 +14,12 @@ import traceback
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Binance Trading API", version="1.0.0")
+app = FastAPI(title="Binance.US Trading API", version="1.0.0")
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React app URL
+    allow_origins=["*"],  # More permissive for hosted environment
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -40,7 +40,7 @@ class TradeResponse(BaseModel):
     executedQty: str
     price: str
 
-# Binance client initialization
+# Binance.US client initialization
 def get_binance_client():
     api_key = os.getenv("BINANCE_API_KEY")
     secret_key = os.getenv("BINANCE_SECRET_KEY")
@@ -64,30 +64,46 @@ def get_binance_client():
         
         raise HTTPException(
             status_code=500, 
-            detail=f"Binance API credentials not configured. Available vars: {available_vars}"
+            detail=f"Binance.US API credentials not configured. Available vars: {available_vars}"
         )
     
     try:
-        client = Client(api_key, secret_key, testnet=False)
+        # Configure client for Binance.US
+        client = Client(
+            api_key=api_key, 
+            api_secret=secret_key,
+            tld='us',  # This makes it use Binance.US
+            testnet=False
+        )
+        
         # Test the connection
         ping_result = client.ping()
-        logger.info(f"Binance client initialized successfully. Ping result: {ping_result}")
+        logger.info(f"Binance.US client initialized successfully. Ping result: {ping_result}")
+        
+        # Test account access
+        try:
+            account_info = client.get_account()
+            logger.info(f"Account access verified. Account type: {account_info.get('accountType', 'unknown')}")
+        except Exception as account_error:
+            logger.warning(f"Account access test failed: {account_error}")
+        
         return client
+        
     except BinanceAPIException as e:
-        logger.error(f"Binance API Exception during client initialization: {e}")
+        logger.error(f"Binance.US API Exception during client initialization: {e}")
         logger.error(f"Error code: {getattr(e, 'code', 'unknown')}")
         logger.error(f"Error message: {getattr(e, 'message', 'unknown')}")
-        raise HTTPException(status_code=500, detail=f"Binance API error: {e}")
+        raise HTTPException(status_code=500, detail=f"Binance.US API error: {e}")
     except Exception as e:
         logger.error(f"General exception during client initialization: {str(e)}")
         logger.error(f"Exception type: {type(e).__name__}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to connect to Binance API: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to connect to Binance.US API: {str(e)}")
     
 
 @app.get("/")
 async def root():
-    return {"message": "Binance Trading API is running"}
+    return {"message": "Binance.US Trading API is running on Render"}
 
 @app.get("/api/balance")
 async def get_balance():
@@ -105,15 +121,24 @@ async def get_balance():
             if free_amount > 0 or locked_amount > 0:
                 # Get USD value (simplified - you might want to implement proper price conversion)
                 usd_value = 0
-                if balance['asset'] == 'USDT':
+                if balance['asset'] == 'USD':
                     usd_value = free_amount
                 elif balance['asset'] in ['BTC', 'ETH', 'BNB']:
                     try:
-                        ticker = client.get_symbol_ticker(symbol=f"{balance['asset']}USDT")
+                        # Use USD pairs for Binance.US
+                        pair_symbol = f"{balance['asset']}USD"
+                        ticker = client.get_symbol_ticker(symbol=pair_symbol)
                         usd_value = free_amount * float(ticker['price'])
                     except Exception as ticker_error:
-                        logger.warning(f"Could not get price for {balance['asset']}: {ticker_error}")
-                        usd_value = 0
+                        logger.warning(f"Could not get USD price for {balance['asset']}: {ticker_error}")
+                        # Fallback to USDT if USD pair doesn't exist
+                        try:
+                            pair_symbol = f"{balance['asset']}USDT"
+                            ticker = client.get_symbol_ticker(symbol=pair_symbol)
+                            usd_value = free_amount * float(ticker['price'])
+                        except Exception as fallback_error:
+                            logger.warning(f"Could not get USDT price for {balance['asset']}: {fallback_error}")
+                            usd_value = 0
                 
                 balances.append({
                     'asset': balance['asset'],
@@ -125,8 +150,8 @@ async def get_balance():
         return balances
     
     except BinanceAPIException as e:
-        logger.error(f"Binance API error in get_balance: {e}")
-        raise HTTPException(status_code=400, detail=f"Binance API error: {e}")
+        logger.error(f"Binance.US API error in get_balance: {e}")
+        raise HTTPException(status_code=400, detail=f"Binance.US API error: {e}")
     except Exception as e:
         logger.error(f"Error fetching balance: {str(e)}")
         logger.error(traceback.format_exc())
@@ -138,8 +163,8 @@ async def get_market_overview():
     try:
         client = get_binance_client()
         
-        # Popular trading pairs
-        symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'XRPUSDT', 'SOLUSDT']
+        # Popular trading pairs available on Binance.US
+        symbols = ['BTCUSD', 'ETHUSD', 'BNBUSD', 'ADAUSD', 'XRPUSD', 'SOLUSD']
         market_data = []
         
         for symbol in symbols:
@@ -160,13 +185,29 @@ async def get_market_overview():
                 })
             except Exception as symbol_error:
                 logger.warning(f"Could not get data for {symbol}: {symbol_error}")
-                continue
+                # Try USDT pair as fallback
+                try:
+                    fallback_symbol = symbol.replace('USD', 'USDT')
+                    ticker = client.get_symbol_ticker(symbol=fallback_symbol)
+                    price_change = client.get_ticker(symbol=fallback_symbol)
+                    
+                    market_data.append({
+                        'symbol': fallback_symbol,
+                        'price': f"{float(ticker['price']):,.2f}",
+                        'change': f"{float(price_change['priceChangePercent']):+.2f}%",
+                        'volume': f"{float(price_change['volume']):,.0f}",
+                        'high': f"{float(price_change['highPrice']):,.2f}",
+                        'low': f"{float(price_change['lowPrice']):,.2f}"
+                    })
+                except Exception as fallback_error:
+                    logger.warning(f"Could not get fallback data for {fallback_symbol}: {fallback_error}")
+                    continue
         
         return market_data
     
     except BinanceAPIException as e:
-        logger.error(f"Binance API error in get_market_overview: {e}")
-        raise HTTPException(status_code=400, detail=f"Binance API error: {e}")
+        logger.error(f"Binance.US API error in get_market_overview: {e}")
+        raise HTTPException(status_code=400, detail=f"Binance.US API error: {e}")
     except Exception as e:
         logger.error(f"Error fetching market overview: {str(e)}")
         logger.error(traceback.format_exc())
@@ -205,8 +246,8 @@ async def get_market_data(symbol: str):
         }
     
     except BinanceAPIException as e:
-        logger.error(f"Binance API error in get_market_data for {symbol}: {e}")
-        raise HTTPException(status_code=400, detail=f"Binance API error: {e}")
+        logger.error(f"Binance.US API error in get_market_data for {symbol}: {e}")
+        raise HTTPException(status_code=400, detail=f"Binance.US API error: {e}")
     except Exception as e:
         logger.error(f"Error fetching market data for {symbol}: {str(e)}")
         logger.error(traceback.format_exc())
@@ -262,7 +303,7 @@ async def execute_trade(trade_request: TradeRequest):
         }
     
     except BinanceAPIException as e:
-        logger.error(f"Binance API error in execute_trade: {e}")
+        logger.error(f"Binance.US API error in execute_trade: {e}")
         raise HTTPException(status_code=400, detail=f"Trade execution failed: {e}")
     except Exception as e:
         logger.error(f"Error executing trade: {str(e)}")
@@ -275,8 +316,8 @@ async def get_trade_history():
     try:
         client = get_binance_client()
         
-        # Get recent trades for major symbols
-        symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
+        # Get recent trades for major symbols available on Binance.US
+        symbols = ['BTCUSD', 'ETHUSD', 'BNBUSD']
         all_trades = []
         
         for symbol in symbols:
@@ -302,8 +343,8 @@ async def get_trade_history():
         return all_trades[:20]  # Return last 20 trades
     
     except BinanceAPIException as e:
-        logger.error(f"Binance API error in get_trade_history: {e}")
-        raise HTTPException(status_code=400, detail=f"Binance API error: {e}")
+        logger.error(f"Binance.US API error in get_trade_history: {e}")
+        raise HTTPException(status_code=400, detail=f"Binance.US API error: {e}")
     except Exception as e:
         logger.error(f"Error fetching trade history: {str(e)}")
         logger.error(traceback.format_exc())
@@ -332,8 +373,8 @@ async def get_open_orders(symbol: str):
         return formatted_orders
     
     except BinanceAPIException as e:
-        logger.error(f"Binance API error in get_open_orders: {e}")
-        raise HTTPException(status_code=400, detail=f"Binance API error: {e}")
+        logger.error(f"Binance.US API error in get_open_orders: {e}")
+        raise HTTPException(status_code=400, detail=f"Binance.US API error: {e}")
     except Exception as e:
         logger.error(f"Error fetching open orders: {str(e)}")
         logger.error(traceback.format_exc())
@@ -354,12 +395,44 @@ async def cancel_order(symbol: str, order_id: str):
         }
     
     except BinanceAPIException as e:
-        logger.error(f"Binance API error in cancel_order: {e}")
-        raise HTTPException(status_code=400, detail=f"Binance API error: {e}")
+        logger.error(f"Binance.US API error in cancel_order: {e}")
+        raise HTTPException(status_code=400, detail=f"Binance.US API error: {e}")
     except Exception as e:
         logger.error(f"Error cancelling order: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to cancel order: {str(e)}")
+
+@app.get("/api/exchange-info")
+async def get_exchange_info():
+    """Get exchange information including available trading pairs"""
+    try:
+        client = get_binance_client()
+        exchange_info = client.get_exchange_info()
+        
+        # Filter for active symbols
+        active_symbols = []
+        for symbol_info in exchange_info['symbols']:
+            if symbol_info['status'] == 'TRADING':
+                active_symbols.append({
+                    'symbol': symbol_info['symbol'],
+                    'baseAsset': symbol_info['baseAsset'],
+                    'quoteAsset': symbol_info['quoteAsset'],
+                    'status': symbol_info['status']
+                })
+        
+        return {
+            'timezone': exchange_info['timezone'],
+            'serverTime': exchange_info['serverTime'],
+            'symbols': active_symbols[:50]  # Return first 50 active symbols
+        }
+    
+    except BinanceAPIException as e:
+        logger.error(f"Binance.US API error in get_exchange_info: {e}")
+        raise HTTPException(status_code=400, detail=f"Binance.US API error: {e}")
+    except Exception as e:
+        logger.error(f"Error fetching exchange info: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch exchange info: {str(e)}")
 
 @app.get("/health")
 async def health_check():
@@ -373,7 +446,8 @@ async def health_check():
             "api_key_exists": api_key is not None,
             "secret_key_exists": secret_key is not None,
             "api_key_length": len(api_key) if api_key else 0,
-            "secret_key_length": len(secret_key) if secret_key else 0
+            "secret_key_length": len(secret_key) if secret_key else 0,
+            "platform": "Binance.US"
         }
         
         if not api_key or not secret_key:
@@ -385,29 +459,42 @@ async def health_check():
                 "available_env_vars": [var for var in os.environ.keys() if 'BINANCE' in var.upper()]
             }
         
-        # Try to create client
-        client = Client(api_key, secret_key, testnet=False)
+        # Try to create client for Binance.US
+        client = Client(api_key=api_key, api_secret=secret_key, tld='us', testnet=False)
         
         # Test the connection
         ping_result = client.ping()
+        
+        # Test account access
+        account_status = "unknown"
+        try:
+            account_info = client.get_account()
+            account_status = account_info.get('accountType', 'verified')
+        except Exception as account_error:
+            logger.warning(f"Account access test failed: {account_error}")
+            account_status = f"access_error: {str(account_error)}"
         
         return {
             "status": "healthy", 
             "timestamp": datetime.now().isoformat(), 
             "binance_connection": "ok",
             "env_status": env_status,
-            "ping_result": ping_result
+            "ping_result": ping_result,
+            "account_status": account_status,
+            "platform": "Binance.US",
+            "hosted_on": "Render"
         }
         
     except BinanceAPIException as e:
-        error_msg = f"Binance API Exception: {str(e)}"
+        error_msg = f"Binance.US API Exception: {str(e)}"
         logger.error(error_msg)
         return {
             "status": "unhealthy", 
             "timestamp": datetime.now().isoformat(),
             "error": error_msg,
             "error_type": "BinanceAPIException",
-            "error_code": getattr(e, 'code', 'unknown')
+            "error_code": getattr(e, 'code', 'unknown'),
+            "platform": "Binance.US"
         }
     except Exception as e:
         error_msg = f"General Exception: {str(e)}"
@@ -418,7 +505,8 @@ async def health_check():
             "timestamp": datetime.now().isoformat(),
             "error": error_msg,
             "error_type": type(e).__name__,
-            "traceback": traceback.format_exc()
+            "traceback": traceback.format_exc(),
+            "platform": "Binance.US"
         }
 
 @app.get("/debug/env")
@@ -428,9 +516,25 @@ async def debug_env():
         "all_env_vars": list(os.environ.keys()),
         "binance_vars": {k: v[:10] + "..." if len(v) > 10 else v for k, v in os.environ.items() if 'BINANCE' in k.upper()},
         "api_key_exists": os.getenv("BINANCE_API_KEY") is not None,
-        "secret_key_exists": os.getenv("BINANCE_SECRET_KEY") is not None
+        "secret_key_exists": os.getenv("BINANCE_SECRET_KEY") is not None,
+        "platform": "Binance.US",
+        "hosted_on": "Render"
     }
 
+# Additional endpoint for render deployment info
+@app.get("/api/deployment-info")
+async def get_deployment_info():
+    """Get deployment information for troubleshooting"""
+    return {
+        "platform": "Binance.US",
+        "hosting": "Render",
+        "api_version": "1.0.0",
+        "python_version": os.sys.version,
+        "environment": os.getenv("ENVIRONMENT", "production"),
+        "port": os.getenv("PORT", "8000"),
+        "timestamp": datetime.now().isoformat()
+    }
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
