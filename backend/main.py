@@ -45,21 +45,45 @@ def get_binance_client():
     api_key = os.getenv("BINANCE_API_KEY")
     secret_key = os.getenv("BINANCE_SECRET_KEY")
     
+    # Enhanced logging
+    logger.info(f"Environment check - API Key exists: {api_key is not None}")
+    logger.info(f"Environment check - Secret Key exists: {secret_key is not None}")
+    
+    if api_key:
+        logger.info(f"API Key length: {len(api_key)}")
+        logger.info(f"API Key starts with: {api_key[:5]}...")
+    
+    if secret_key:
+        logger.info(f"Secret Key length: {len(secret_key)}")
+        logger.info(f"Secret Key starts with: {secret_key[:5]}...")
+    
     if not api_key or not secret_key:
-        logger.error("Binance API credentials not found in environment variables")
+        available_vars = [var for var in os.environ.keys() if 'BINANCE' in var.upper()]
+        logger.error(f"Missing credentials. Available BINANCE vars: {available_vars}")
+        logger.error(f"All environment variables: {list(os.environ.keys())}")
+        
         raise HTTPException(
             status_code=500, 
-            detail="Binance API credentials not configured. Please set BINANCE_API_KEY and BINANCE_SECRET_KEY environment variables."
+            detail=f"Binance API credentials not configured. Available vars: {available_vars}"
         )
     
     try:
-        client = Client(api_key, secret_key, testnet=False)  # Set testnet=False for production
+        client = Client(api_key, secret_key, testnet=False)
         # Test the connection
-        client.ping()
+        ping_result = client.ping()
+        logger.info(f"Binance client initialized successfully. Ping result: {ping_result}")
         return client
+    except BinanceAPIException as e:
+        logger.error(f"Binance API Exception during client initialization: {e}")
+        logger.error(f"Error code: {getattr(e, 'code', 'unknown')}")
+        logger.error(f"Error message: {getattr(e, 'message', 'unknown')}")
+        raise HTTPException(status_code=500, detail=f"Binance API error: {e}")
     except Exception as e:
-        logger.error(f"Failed to initialize Binance client: {str(e)}")
+        logger.error(f"General exception during client initialization: {str(e)}")
+        logger.error(f"Exception type: {type(e).__name__}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to connect to Binance API: {str(e)}")
+    
 
 @app.get("/")
 async def root():
@@ -339,14 +363,74 @@ async def cancel_order(symbol: str, order_id: str):
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint with detailed error reporting"""
     try:
-        client = get_binance_client()
-        client.ping()
-        return {"status": "healthy", "timestamp": datetime.now().isoformat(), "binance_connection": "ok"}
+        # Check environment variables first
+        api_key = os.getenv("BINANCE_API_KEY")
+        secret_key = os.getenv("BINANCE_SECRET_KEY")
+        
+        env_status = {
+            "api_key_exists": api_key is not None,
+            "secret_key_exists": secret_key is not None,
+            "api_key_length": len(api_key) if api_key else 0,
+            "secret_key_length": len(secret_key) if secret_key else 0
+        }
+        
+        if not api_key or not secret_key:
+            return {
+                "status": "unhealthy", 
+                "timestamp": datetime.now().isoformat(),
+                "error": "Missing API credentials",
+                "env_status": env_status,
+                "available_env_vars": [var for var in os.environ.keys() if 'BINANCE' in var.upper()]
+            }
+        
+        # Try to create client
+        client = Client(api_key, secret_key, testnet=False)
+        
+        # Test the connection
+        ping_result = client.ping()
+        
+        return {
+            "status": "healthy", 
+            "timestamp": datetime.now().isoformat(), 
+            "binance_connection": "ok",
+            "env_status": env_status,
+            "ping_result": ping_result
+        }
+        
+    except BinanceAPIException as e:
+        error_msg = f"Binance API Exception: {str(e)}"
+        logger.error(error_msg)
+        return {
+            "status": "unhealthy", 
+            "timestamp": datetime.now().isoformat(),
+            "error": error_msg,
+            "error_type": "BinanceAPIException",
+            "error_code": getattr(e, 'code', 'unknown')
+        }
     except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        return {"status": "unhealthy", "timestamp": datetime.now().isoformat(), "error": str(e)}
+        error_msg = f"General Exception: {str(e)}"
+        logger.error(error_msg)
+        logger.error(traceback.format_exc())
+        return {
+            "status": "unhealthy", 
+            "timestamp": datetime.now().isoformat(),
+            "error": error_msg,
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }
+
+@app.get("/debug/env")
+async def debug_env():
+    """Debug endpoint to check environment variables"""
+    return {
+        "all_env_vars": list(os.environ.keys()),
+        "binance_vars": {k: v[:10] + "..." if len(v) > 10 else v for k, v in os.environ.items() if 'BINANCE' in k.upper()},
+        "api_key_exists": os.getenv("BINANCE_API_KEY") is not None,
+        "secret_key_exists": os.getenv("BINANCE_SECRET_KEY") is not None
+    }
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
