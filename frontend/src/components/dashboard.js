@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, Wallet, Activity, AlertCircle, RefreshCw, X } from 'lucide-react';
 
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = 'https://binance-server-singapore.onrender.com';
 
 const BinanceTradingDashboard = () => {
   const [activeTab, setActiveTab] = useState('overview');
