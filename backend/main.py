@@ -19,7 +19,10 @@ app = FastAPI(title="Binance Trading API", version="1.0.0")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React app URL
+    allow_origins=[
+        "http://localhost:3000",  # For local development
+        "https://binance-client.onrender.com"  # For production
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
